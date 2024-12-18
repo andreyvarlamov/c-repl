@@ -8,6 +8,8 @@
 char *read_whole_file(const char *file_name);
 char **extract_function_declarations(const char *input, int *out_function_count);
 void generate_executing_code(const char *file_name, char **function_declarations, int function_count, const char *expression);
+void compile(const char *file_name, const char *compiled_file_name);
+void run_lli(const char *user_code_file, const char *generated_file);
 
 int main(int argc, char **argv) {
     if (argc != 3) {
@@ -21,12 +23,15 @@ int main(int argc, char **argv) {
     printf("%s: %s\n", file_name, expression);
 
     char *file_contents = read_whole_file(file_name);
-    printf("file_contents:\n%s\n", file_contents);
 
     int function_count = 0;
     char **function_declarations = extract_function_declarations(file_contents, &function_count);
 
     generate_executing_code("generated.c", function_declarations, function_count, expression);
+
+    compile(file_name, "bin/user_code.ll");
+    compile("generated.c", "bin/generated.ll");
+    run_lli("bin/generated.ll", "bin/user_code.ll");
 
     for (int i = 0; i < function_count; i++) {
 	free(function_declarations[i]);
@@ -137,4 +142,31 @@ void generate_executing_code(const char *file_name, char **function_declarations
     fclose(file);
 
     printf("INFO: Done!\n");
+}
+
+void compile(const char *file_name, const char *compiled_file_name) {
+    char command[256];
+    snprintf(command, sizeof(command), "clang -S -emit-llvm %s -o %s", file_name, compiled_file_name);
+    int ret = system(command);
+    if (ret != 0) {
+	fprintf(stderr, "Clang failed with error code %d\n", ret);
+	exit(1);
+    }
+}
+
+void run_lli(const char *user_code_file, const char *generated_file) {
+    char command[256];
+    snprintf(command, sizeof(command), "llvm-link -S %s %s -o bin/combined.ll", user_code_file, generated_file);
+    int ret = system(command);
+    if (ret != 0) {
+	fprintf(stderr, "llvm-linked with error code %d\n", ret);
+	exit(1);
+    }
+    printf("Output: \n");
+    ret = system("lli bin/combined.ll");
+    if (ret != 0) {
+	fprintf(stderr, "llvm-linked with error code %d\n", ret);
+	exit(1);
+    }
+    printf("\n");
 }
