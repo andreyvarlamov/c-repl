@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,31 +6,77 @@
 
 #define MAX_FUNCTIONS 128
 
+void usage_and_error();
+void validate_args(int argc, char **argv);
+
+void mode_compile(const char *file_name);
+void mode_execute(const char *expression);
+void mode_clean();
+
 char *read_whole_file(const char *file_name);
 char **extract_function_declarations(const char *input, int *out_function_count);
 void generate_executing_code(const char *file_name, char **function_declarations, int function_count, const char *expression);
+
 void compile(const char *file_name, const char *compiled_file_name);
 void run_lli(const char *user_code_file, const char *generated_file);
 
 int main(int argc, char **argv) {
-    if (argc != 3) {
-	fprintf(stderr, "Usage: execute [file] [expression]\n");
-	exit(1);
+    validate_args(argc, argv);
+
+    const char *mode = argv[1];
+    if (strcmp(mode, "compile") == 0) {
+	const char *file_name = argv[2];
+	mode_compile(file_name);
+    } else if (strcmp(mode, "execute") == 0) {
+	const char *expression = argv[2];
+	mode_execute(expression);
+    } else if (strcmp(mode, "clean") == 0) {
+	mode_clean();
     }
 
-    const char *file_name = argv[1];
-    const char *expression = argv[2];
+    return 0;
+}
 
-    printf("%s: %s\n", file_name, expression);
+void usage_and_error() {
+    fprintf(stderr, ("Usage: jit-calc compile file\n"
+		     "       jit-calc execute expression\n"
+		     "       jit-calc clean\n"));
+    exit(1);
+}
 
-    char *file_contents = read_whole_file(file_name);
+void validate_args(int argc, char **argv) {
+    if (argc < 2) {
+	usage_and_error();
+    }
+
+    const char *mode = argv[1];
+
+    if (strcmp(mode, "compile") == 0 || strcmp(mode, "execute") == 0) {
+	if (argc != 3) {
+	    usage_and_error();
+	}
+    } else if (strcmp(mode, "clean") == 0) {
+	if (argc != 2) {
+	    usage_and_error();
+	}
+    }
+}
+
+void mode_compile(const char *file_name) {
+    // TODO: Store all generated artifacts in its own folder
+    // TODO: Copy c file to user_code.c; so execute mode doesn't need to remember the name of the file
+    compile(file_name, "bin/user_code.ll");
+}
+
+void mode_execute(const char *expression) {
+    char *file_contents = read_whole_file("user_code.c");
 
     int function_count = 0;
     char **function_declarations = extract_function_declarations(file_contents, &function_count);
 
     generate_executing_code("generated.c", function_declarations, function_count, expression);
 
-    compile(file_name, "bin/user_code.ll");
+    // TODO: Store all generated artifacts in its own folder
     compile("generated.c", "bin/generated.ll");
     run_lli("bin/generated.ll", "bin/user_code.ll");
 
@@ -38,8 +85,12 @@ int main(int argc, char **argv) {
     }
     free(function_declarations);
     free(file_contents);
+}
 
-    return 0;
+void mode_clean() {
+    // TODO: Clean files generated in the artifact dir
+    fprintf(stderr, "Not implemented!\n");
+    exit(1);
 }
 
 char *read_whole_file(const char *file_name) {
