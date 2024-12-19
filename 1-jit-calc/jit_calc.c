@@ -2,7 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <regex.h>
+#include <unistd.h>
 
 #define MAX_FUNCTIONS 128
 
@@ -10,15 +12,18 @@ void usage_and_error();
 void validate_args(int argc, char **argv);
 
 void mode_compile(const char *file_name);
-void mode_execute(const char *expression);
+void mode_execute();
 void mode_clean();
 
+void copy_file(const char *src, const char *dest);
+
+void eval_expression(const char *expression);
 char *read_whole_file(const char *file_name);
 char **extract_function_declarations(const char *input, int *out_function_count);
 void generate_executing_code(const char *file_name, char **function_declarations, int function_count, const char *expression);
 
 void compile(const char *file_name, const char *compiled_file_name);
-void run_lli(const char *user_code_file, const char *generated_file);
+void run_lli(const char *user_code_file, const char *generated_file, const char *linked_file_name);
 
 int main(int argc, char **argv) {
     validate_args(argc, argv);
@@ -28,8 +33,7 @@ int main(int argc, char **argv) {
 	const char *file_name = argv[2];
 	mode_compile(file_name);
     } else if (strcmp(mode, "execute") == 0) {
-	const char *expression = argv[2];
-	mode_execute(expression);
+	mode_execute();
     } else if (strcmp(mode, "clean") == 0) {
 	mode_clean();
     }
@@ -39,7 +43,7 @@ int main(int argc, char **argv) {
 
 void usage_and_error() {
     fprintf(stderr, ("Usage: jit-calc compile file\n"
-		     "       jit-calc execute expression\n"
+		     "       jit-calc execute\n"
 		     "       jit-calc clean\n"));
     exit(1);
 }
@@ -51,11 +55,11 @@ void validate_args(int argc, char **argv) {
 
     const char *mode = argv[1];
 
-    if (strcmp(mode, "compile") == 0 || strcmp(mode, "execute") == 0) {
+    if (strcmp(mode, "compile") == 0) {
 	if (argc != 3) {
 	    usage_and_error();
 	}
-    } else if (strcmp(mode, "clean") == 0) {
+    } else if (strcmp(mode, "execute") == 0 || strcmp(mode, "clean") == 0) {
 	if (argc != 2) {
 	    usage_and_error();
 	}
@@ -63,34 +67,88 @@ void validate_args(int argc, char **argv) {
 }
 
 void mode_compile(const char *file_name) {
-    // TODO: Store all generated artifacts in its own folder
-    // TODO: Copy c file to user_code.c; so execute mode doesn't need to remember the name of the file
-    compile(file_name, "bin/user_code.ll");
+    if (mkdir("_generated", 0755) != 0) {
+	mode_clean();
+	if (mkdir("_generated", 0755) != 0) {
+	    perror("Failed to make _generated dir.");
+	    exit(1);
+	}
+    }
+
+    copy_file(file_name, "_generated/user_code.c");
+
+    compile("_generated/user_code.c", "_generated/user_code.ll");
 }
 
-void mode_execute(const char *expression) {
-    char *file_contents = read_whole_file("user_code.c");
+static char stdin_buffer[1024 * 1024];
+
+void mode_execute() {
+    while(true) {
+	printf(">> ");
+	if (fgets(stdin_buffer, sizeof(stdin_buffer), stdin) == NULL) {
+	    break;
+	}
+
+	size_t len = strlen(stdin_buffer);
+	if (len > 0 && stdin_buffer[len] == '\n') {
+	    stdin_buffer[len] = '\0';
+	}
+
+	eval_expression(stdin_buffer);
+    }
+}
+
+void mode_clean() {
+    if (unlink("_generated/generated.c") != 0) {
+	perror("Failed to remove _generated/generated.c");
+    }
+    if (unlink("_generated/user_code.c") != 0) {
+	perror("Failed to remove _generated/user_code.c");
+    }
+    if (unlink("_generated/generated.ll") != 0) {
+	perror("Failed to remove _generated/generated.ll");
+    }
+    if (unlink("_generated/user_code.ll") != 0) {
+	perror("Failed to remove _generated/user_code.ll");
+    }
+    if (unlink("_generated/combined.ll") != 0) {
+	perror("Failed to remove _generated/combined.ll");
+    }
+
+    if (rmdir("_generated") != 0) {
+	perror("Failed to remove _generated");
+	exit(1);
+    }
+
+    printf("INFO: Cleaned generated files.\n");
+}
+
+
+void copy_file(const char *src, const char *dest) {
+    char command[256];
+    snprintf(command, sizeof(command), "cp %s %s", src, dest);
+    if (system(command) != 0) {
+	perror("Copy failed");
+	exit(1);
+    }
+}
+
+void eval_expression(const char *expression) {
+    char *file_contents = read_whole_file("_generated/user_code.c");
 
     int function_count = 0;
     char **function_declarations = extract_function_declarations(file_contents, &function_count);
 
-    generate_executing_code("generated.c", function_declarations, function_count, expression);
+    generate_executing_code("_generated/generated.c", function_declarations, function_count, expression);
 
-    // TODO: Store all generated artifacts in its own folder
-    compile("generated.c", "bin/generated.ll");
-    run_lli("bin/generated.ll", "bin/user_code.ll");
+    compile("_generated/generated.c", "_generated/generated.ll");
+    run_lli("_generated/generated.ll", "_generated/user_code.ll", "_generated/combined.ll");
 
     for (int i = 0; i < function_count; i++) {
 	free(function_declarations[i]);
     }
     free(function_declarations);
     free(file_contents);
-}
-
-void mode_clean() {
-    // TODO: Clean files generated in the artifact dir
-    fprintf(stderr, "Not implemented!\n");
-    exit(1);
 }
 
 char *read_whole_file(const char *file_name) {
@@ -116,7 +174,7 @@ char *read_whole_file(const char *file_name) {
 }
 
 char **extract_function_declarations(const char *input, int *out_function_count) {
-    printf("\nExtracting function declarations...\n");
+    /* printf("\nExtracting function declarations...\n"); */
     regex_t regex_state;
     regmatch_t match[2];
 
@@ -152,9 +210,9 @@ char **extract_function_declarations(const char *input, int *out_function_count)
 	}
 
 	functions[function_count] = strncpy(functions[function_count], cursor + match_start, match_length);
-	functions[function_count][match_length + 1] = '\0';
+	functions[function_count][match_length] = '\0';
 
-	printf("INFO: Found: %s\n", functions[function_count]);
+	/* printf("INFO: Found: %s\n", functions[function_count]); */
 
 	cursor += match_end;
 
@@ -165,7 +223,7 @@ char **extract_function_declarations(const char *input, int *out_function_count)
 	}
     }
 
-    printf("INFO: %d functions found.\n", function_count);
+    /* printf("INFO: %d functions found.\n", function_count); */
     regfree(&regex_state);
 
     *out_function_count = function_count;
@@ -173,7 +231,7 @@ char **extract_function_declarations(const char *input, int *out_function_count)
 }
 
 void generate_executing_code(const char *file_name, char **function_declarations, int function_count, const char *expression) {
-    printf("INFO: Generating executing code...\n");
+    /* printf("INFO: Generating executing code...\n"); */
     FILE *file = fopen(file_name, "w");
     if (file == NULL) {
 	fprintf(stderr, "ERROR: Failed to open %s for writing.", file_name);
@@ -192,7 +250,7 @@ void generate_executing_code(const char *file_name, char **function_declarations
 
     fclose(file);
 
-    printf("INFO: Done!\n");
+    /* printf("INFO: Done!\n"); */
 }
 
 void compile(const char *file_name, const char *compiled_file_name) {
@@ -200,23 +258,23 @@ void compile(const char *file_name, const char *compiled_file_name) {
     snprintf(command, sizeof(command), "clang -S -emit-llvm %s -o %s", file_name, compiled_file_name);
     int ret = system(command);
     if (ret != 0) {
-	fprintf(stderr, "Clang failed with error code %d\n", ret);
+	fprintf(stderr, "\"%s\" failed with error code %d\n", command, ret);
 	exit(1);
     }
 }
 
-void run_lli(const char *user_code_file, const char *generated_file) {
+void run_lli(const char *user_code_file, const char *generated_file, const char *linked_file_name) {
     char command[256];
-    snprintf(command, sizeof(command), "llvm-link -S %s %s -o bin/combined.ll", user_code_file, generated_file);
+    snprintf(command, sizeof(command), "llvm-link -S %s %s -o %s", user_code_file, generated_file, linked_file_name);
     int ret = system(command);
     if (ret != 0) {
-	fprintf(stderr, "llvm-linked with error code %d\n", ret);
+	fprintf(stderr, "\"%s\" failed with error code %d\n", command, ret);
 	exit(1);
     }
-    printf("Output: \n");
-    ret = system("lli bin/combined.ll");
+    snprintf(command, sizeof(command), "lli %s", linked_file_name);
+    ret = system(command);
     if (ret != 0) {
-	fprintf(stderr, "llvm-linked with error code %d\n", ret);
+	fprintf(stderr, "\"%s\" failed with error code %d\n", command, ret);
 	exit(1);
     }
     printf("\n");
