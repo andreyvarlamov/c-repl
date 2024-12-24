@@ -20,6 +20,8 @@ void trace_log(const char *msg, ...);
 
 void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, int mods);
 
+void bake_font_test();
+
 void initialize_gl();
 void draw();
 
@@ -60,6 +62,8 @@ int main() {
     
     trace_log("Entering main loop");
 
+    bake_font_test();
+
     while (!glfwWindowShouldClose(glfw_window)) {
 	draw();
 
@@ -95,6 +99,10 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
 	trace_log("Received ESC. Terminating...");
 	glfwSetWindowShouldClose(window, true);
     }
+}
+
+void bake_font_test() {
+    // TODO
 }
 
 void initialize_gl() {
