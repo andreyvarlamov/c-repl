@@ -8,6 +8,10 @@
 #include "glad/glad.h"
 #include <GLFW/glfw3.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb/stb_image.h"
+
+static uint32_t texture;
 static uint32_t vao;
 static uint32_t shader_program_id;
 
@@ -94,40 +98,81 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
 }
 
 void initialize_gl() {
-    static float tri_vertices[] = {
-	-0.5f, -0.5f, 0.0f,
-	0.5f, -0.5f, 0.0f,
-	0.0f,  0.5f, 0.0f
+    static float quad_vertices[] = {
+	// Positions         // Texture Coords
+	-0.5f, -0.5f, 0.0f,  0.0f, 0.0f,  // Bottom-left
+	 0.5f, -0.5f, 0.0f,  1.0f, 0.0f,  // Bottom-right
+	 0.5f,  0.5f, 0.0f,  1.0f, 1.0f,  // Top-right
+	-0.5f,  0.5f, 0.0f,  0.0f, 1.0f   // Top-left
+    };
+
+    static uint32_t quad_indices[] = {
+	0, 1, 2,  // First Triangle
+	0, 2, 3   // Second Triangle
     };
 
     static const char *vert_shader_source =
 	"#version 430 core\n"
 	"layout (location = 0) in vec3 aPos;\n"
+	"layout (location = 1) in vec2 aTexCoord;\n"
+	"out vec2 TexCoord;\n"
 	"void main() {\n"
 	"    gl_Position = vec4(aPos, 1.0);\n"
+	"    TexCoord = aTexCoord;\n"
 	"}";
 
     static const char *frag_shader_source =
 	"#version 430 core\n"
 	"out vec4 FragColor;\n"
+	"in vec2 TexCoord;\n"
+	"uniform sampler2D texture1;\n"
 	"void main() {\n"
-	"    FragColor = vec4(1.0, 0.5, 0.2, 1.0);\n"
+	"    FragColor = texture(texture1, TexCoord);\n"
 	"}";
 
-    uint32_t vbo;
+    uint32_t vbo, ebo;
     glGenVertexArrays(1, &vao);
     glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
 
     glBindVertexArray(vao);
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(tri_vertices), tri_vertices, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad_vertices), quad_vertices, GL_DYNAMIC_DRAW);
 
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(quad_indices), quad_indices, GL_DYNAMIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) 0);
     glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) (3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    stbi_set_flip_vertically_on_load(true);
+    int width, height, channel_count;
+    uint8_t *image_data = stbi_load("res/claesz.png", &width, &height, &channel_count, STBI_rgb_alpha);
+    if (image_data == NULL) {
+	exit_with_error("Failed to load image at res/claesz.png");
+    }
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    stbi_image_free(image_data);
 
     uint32_t vert_shader_id = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vert_shader_id, 1, &vert_shader_source, NULL);
@@ -144,14 +189,15 @@ void initialize_gl() {
 
     glDeleteShader(vert_shader_id);
     glDeleteShader(frag_shader_id);
-
 }
 
 void draw() {
     glUseProgram(shader_program_id);
     glBindVertexArray(vao);
+    glBindTexture(GL_TEXTURE_2D, texture);
 
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 
     glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
