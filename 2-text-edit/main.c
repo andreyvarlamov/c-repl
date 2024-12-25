@@ -10,6 +10,10 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb/stb_image_write.h"
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb/stb_truetype.h"
 
 static uint32_t texture;
 static uint32_t vao;
@@ -102,7 +106,38 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
 }
 
 void bake_font_test() {
-    // TODO
+    FILE *font_file = fopen("res/ubuntu_mono.ttf", "rb");
+    if (!font_file) {
+	exit_with_error("Failed to load font at res/ubuntu_mono.ttf");
+    }
+
+    fseek(font_file, 0, SEEK_END);
+    size_t font_size = ftell(font_file);
+    rewind(font_file);
+
+    uint8_t *font_buffer = malloc(font_size);
+    fread(font_buffer, 1, font_size, font_file);
+    fclose(font_file);
+
+    enum { ATLAS_DIM = 1024 };
+    uint8_t *atlas_bytes = calloc(1, ATLAS_DIM * ATLAS_DIM);
+
+    stbtt_bakedchar char_data[95]; // ASCII Range: [32, 126]
+    int result = stbtt_BakeFontBitmap(font_buffer, 0, 32.0f,
+				      atlas_bytes, ATLAS_DIM, ATLAS_DIM,
+				      32, 95, char_data);
+    free(font_buffer);
+
+    if (result <= 0) {
+	exit_with_error("Failed to bake font bitmap");
+    }
+
+    int write_png_result = stbi_write_png("temp/baked_font.png", ATLAS_DIM, ATLAS_DIM, 1, atlas_bytes, ATLAS_DIM);
+    if (!write_png_result) {
+	exit_with_error("Failed to write baked atlas to temp/baked_font.png");
+    }
+
+    trace_log("Bake Font Test: wrote baked atlas png to temp/baked_font.png");
 }
 
 void initialize_gl() {
