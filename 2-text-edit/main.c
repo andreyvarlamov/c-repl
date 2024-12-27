@@ -19,6 +19,7 @@
 enum { SCREEN_WIDTH = 800, SCREEN_HEIGHT = 600 };
 enum { MAX_VERT = 1024, MAX_IDX = 4096 };
 enum { GL_ERROR_BUFFER_MAX_LENGTH = 1024 * 1024 };
+enum { BAKED_BASE_ASCII = 32, BAKED_GLYPH_COUNT = 95 }; // ASCII Range: [32, 126]
 
 typedef struct Texture {
     uint32_t id;
@@ -38,11 +39,22 @@ typedef struct Gl_State {
     Texture empty_texture;
 } Gl_State;
 
+typedef struct Baked_Font {
+    uint8_t *rgba_bytes;
+    Texture tex;
+    stbtt_bakedchar glyph_metrics[BAKED_GLYPH_COUNT];
+    size_t base_ascii;
+    size_t glyph_count;
+    float points_height;
+} Baked_Font;
+
 static Gl_State g_gl_state;
 static char gl_error_buffer[GL_ERROR_BUFFER_MAX_LENGTH];
 
 void exit_with_error(const char *msg, ...);
 void trace_log(const char *msg, ...);
+void *xmalloc(size_t bytes);
+void *xcalloc(size_t bytes);
 
 void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, int mods);
 void window_size_callback(GLFWwindow *window, int width, int height);
@@ -56,14 +68,15 @@ void set_ortho_projection(int width, int height);
 
 Texture load_texture(const char *file);
 Texture load_empty_texture();
-Texture load_font_atlas_texture(const char *file, uint32_t atlas_dim);
 
 void draw_texture(Rect dest, Texture texture, Rect src, vec4 color);
 void draw_quad(Rect quad, vec4 color);
 void draw_scaled_texture(vec2 pos, Texture texture, float scale);
 
-uint8_t *bake_font(const char *file_name, int atlas_dim);
-void test_bake_font_to_png(const char *font_file_name, const char *out_png_file_name);
+Baked_Font bake_font(const char *file_name, float points_height, int atlas_dim);
+void test_bake_font_to_png(const char *font_file_name, const char *out_png_file_name, float points_height, int atlas_dim);
+Baked_Font bake_font_to_texture(const char *file, float points_height, int atlas_dim);
+void draw_glyph(char glyph, vec2 pos, vec4 color, Baked_Font font);
 
 int main() {
     if (!glfwInit()) {
@@ -108,10 +121,10 @@ int main() {
 
     set_ortho_projection(SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    Texture claesz = load_texture("res/claesz.png");
-    Texture font_atlas = load_font_atlas_texture("res/ubuntu_mono.ttf", 512);
+    test_bake_font_to_png("res/ubuntu_mono.ttf", "temp/baked_font.png", 32.0f, 512);
 
-    /* test_bake_font_to_png("res/ubuntu_mono.ttf", "temp/baked_font.png"); */
+    Texture claesz = load_texture("res/claesz.png");
+    Baked_Font baked_font = bake_font_to_texture("res/ubuntu_mono.ttf", 32.0f, 512);
 
     trace_log("Entering main loop");
     while (!glfwWindowShouldClose(glfw_window)) {
@@ -121,13 +134,14 @@ int main() {
 
 	draw_quad((Rect){200.0f, 290.0f, 50.0f, 50.0f}, (vec4){0.0f, 1.0f, 0.0f, 0.5f});
 
-	draw_scaled_texture((vec2){50.0f, 50.0f}, font_atlas, 4.0f);
+	draw_scaled_texture((vec2){50.0f, 50.0f}, baked_font.tex, 4.0f);
 
-	Rect glyph_rect = (Rect){16.0f, 31.0f, 30.0 - 16.0f, 51.0f - 31.0f}; //x0 = 16, y0 = 31, x1 = 30, y1 = 51
-	draw_texture((Rect){10.0f, 10.0f, glyph_rect.w, glyph_rect.h},
-		     font_atlas,
-		     glyph_rect,
-		     (vec4){1.0f, 0.0f, 1.0f, 0.5f});
+	const char *hello = "Hello";
+	float x = 10.0f;
+	for (const char *hello_cursor = hello; *hello_cursor != '\0'; hello_cursor++) {
+	    draw_glyph(*hello_cursor, (vec2){x, 10.0f}, (vec4){0.6f, 0.6f, 0.6f, 1.0f}, baked_font);
+	    x += 40.0f;
+	}
 
 	glfwSwapBuffers(glfw_window);
 	glfwPollEvents();
@@ -158,6 +172,17 @@ void trace_log(const char *msg, ...) {
     vprintf(msg, ap);
     va_end(ap);
     printf("\n");
+}
+
+void *xmalloc(size_t bytes) {
+    void *d = malloc(bytes);
+    if (d == NULL) exit_with_error("Failed to malloc");
+    return d;
+}
+void *xcalloc(size_t bytes) {
+    void *d = calloc(1, bytes);
+    if (d == NULL) exit_with_error("Failed to calloc");
+    return d;
 }
 
 void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, int mods) {
@@ -354,29 +379,6 @@ Texture load_empty_texture() {
     return texture;
 }
 
-Texture load_font_atlas_texture(const char *file, uint32_t atlas_dim) {
-    Texture texture = {0};
-
-    glGenTextures(1, &texture.id);
-    glBindTexture(GL_TEXTURE_2D, texture.id);
-
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    uint8_t *font_atlas = bake_font(file, atlas_dim);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlas_dim, atlas_dim, 0, GL_RGBA, GL_UNSIGNED_BYTE, font_atlas);
-    glGenerateMipmap(GL_TEXTURE_2D);
-
-    glBindTexture(GL_TEXTURE_2D, 0);
-    free(font_atlas);
-
-    texture.w = texture.h = (float)atlas_dim;
-
-    return texture;
-}
-
 void draw_texture(Rect dest, Texture texture, Rect src, vec4 color) {
     glBindBuffer(GL_ARRAY_BUFFER, g_gl_state.vbo);
 
@@ -460,58 +462,97 @@ void draw_scaled_texture(vec2 pos, Texture texture, float scale) {
 		 (vec4){1.0f, 1.0f, 1.0f, 1.0f});
 }
 
-uint8_t *bake_font(const char *file_name, int atlas_dim) {
+Baked_Font bake_font(const char *file_name, float points_height, int atlas_dim) {
+    Baked_Font baked_font = {0};
+    baked_font.base_ascii = BAKED_BASE_ASCII;
+    baked_font.glyph_count = BAKED_GLYPH_COUNT;
+
     FILE *font_file = fopen(file_name, "rb");
-    if (!font_file) {
-	exit_with_error("Failed to load font at %s", file_name);
-    }
+    if (!font_file) exit_with_error("Failed to load font at %s", file_name);
 
     fseek(font_file, 0, SEEK_END);
     size_t font_size = ftell(font_file);
     rewind(font_file);
 
-    uint8_t *font_bytes = malloc(font_size);
+    uint8_t *font_bytes = xmalloc(font_size);
     fread(font_bytes, 1, font_size, font_file);
     fclose(font_file);
 
     size_t pixel_count = atlas_dim * atlas_dim;
-    uint8_t *atlas_gray_bytes = calloc(1, pixel_count);
+    uint8_t *atlas_gray_bytes = xcalloc(pixel_count);
 
-    stbtt_bakedchar char_data[95]; // ASCII Range: [32, 126]
-    int result = stbtt_BakeFontBitmap(font_bytes, 0, 32.0f,
+    int result = stbtt_BakeFontBitmap(font_bytes, 0, points_height,
 				      atlas_gray_bytes, atlas_dim, atlas_dim,
-				      32, 95, char_data);
+				      baked_font.base_ascii, baked_font.glyph_count, baked_font.glyph_metrics);
+    if (result <= 0) exit_with_error("Failed to bake font bitmap. stbtt_BakeFontBitmap(...) = %d", result);
+
     free(font_bytes);
 
-    if (result <= 0) {
-	exit_with_error("Failed to bake font bitmap. stbtt_BakeFontBitmap(...) = %d", result);
-    }
+    uint8_t *atlas_rgba_bytes = xmalloc(pixel_count * 4);
 
-    uint8_t *atlas_rgba_bytes = malloc(pixel_count * 4);
     for (size_t i = 0; i < pixel_count; i++) {
 	atlas_rgba_bytes[i * 4 + 0] = atlas_gray_bytes[i];
 	atlas_rgba_bytes[i * 4 + 1] = atlas_gray_bytes[i];
 	atlas_rgba_bytes[i * 4 + 2] = atlas_gray_bytes[i];
-	/* atlas_rgba_bytes[i * 4 + 3] = atlas_gray_bytes[i] > 0 ? 0xFF : 0; */
 	atlas_rgba_bytes[i * 4 + 3] = atlas_gray_bytes[i];
     }
 
     free(atlas_gray_bytes);
 
-    return atlas_rgba_bytes;
+    baked_font.rgba_bytes = atlas_rgba_bytes;
+    baked_font.tex.w = atlas_dim;
+    baked_font.tex.h = atlas_dim;
+    baked_font.points_height = points_height;
+
+    return baked_font;
 }
 
-void test_bake_font_to_png(const char *font_file_name, const char *out_png_file_name) {
-    enum { ATLAS_DIM = 1024 };
-
-    uint8_t *atlas_bytes = bake_font(font_file_name, ATLAS_DIM);
-
-    int write_png_result = stbi_write_png(out_png_file_name, ATLAS_DIM, ATLAS_DIM, 1, atlas_bytes, ATLAS_DIM);
+void test_bake_font_to_png(const char *font_file_name, const char *out_png_file_name, float points_height, int atlas_dim) {
+    Baked_Font baked_font = bake_font(font_file_name, points_height, atlas_dim);
+    int write_png_result = stbi_write_png(out_png_file_name,
+					  atlas_dim,
+					  atlas_dim,
+					  1,
+					  baked_font.rgba_bytes,
+					  atlas_dim);
     if (!write_png_result) {
 	exit_with_error("Failed to write baked atlas to %s", out_png_file_name);
     }
-
     trace_log("test_bake_font_to_png: wrote baked atlas png to %s", out_png_file_name);
+    free(baked_font.rgba_bytes);
+}
 
-    free(atlas_bytes);
+Baked_Font bake_font_to_texture(const char *file, float points_height, int atlas_dim) {
+    Baked_Font baked_font = bake_font(file, points_height, atlas_dim);
+
+    glGenTextures(1, &baked_font.tex.id);
+    glBindTexture(GL_TEXTURE_2D, baked_font.tex.id);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, baked_font.tex.w, baked_font.tex.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, baked_font.rgba_bytes);
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    return baked_font;
+}
+
+
+void draw_glyph(char glyph, vec2 pos, vec4 color, Baked_Font font) {
+    int glyph_i = glyph - font.base_ascii;
+    assert((size_t)glyph_i < font.glyph_count && "Non-printable glyph encountered");
+
+    /* typedef struct {unsigned short x0,y0,x1,y1; float xoff,yoff,xadvance;} stbtt_bakedchar; */
+    stbtt_bakedchar metrics = font.glyph_metrics[glyph_i];
+    float glyph_px_w = (float)(metrics.x1 - metrics.x0);
+    float glyph_px_h = (float)(metrics.y1 - metrics.y0);
+
+    Rect dest = {pos[0], pos[1], glyph_px_w, glyph_px_h};
+    Rect src = {metrics.x0, metrics.y0, glyph_px_w, glyph_px_h};
+
+    draw_texture(dest, font.tex, src, color);
 }
