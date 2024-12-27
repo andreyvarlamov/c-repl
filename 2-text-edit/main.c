@@ -56,6 +56,7 @@ typedef struct Baked_Font {
 typedef struct Text_Edit_State {
     char text_buffer[ONE_MB];
     size_t text_buffer_cursor;
+    size_t used_size;
 } Text_Edit_State;
 
 static Gl_State g_gl_state;
@@ -91,8 +92,11 @@ Baked_Font bake_font(const char *file_name, float points_height, int atlas_dim);
 void test_bake_font_to_png(const char *font_file_name, const char *out_png_file_name, float points_height, int atlas_dim);
 Baked_Font bake_font_to_texture(const char *file, float points_height, int atlas_dim);
 void draw_string(const char *str, vec2 pos, vec4 color, Baked_Font font, float line_height);
+void draw_string_with_cursor(const char *str, size_t cursor, vec2 pos, vec4 color, Baked_Font font, float line_height);
 
 void handle_input_char(uint32_t c);
+void handle_backspace_char();
+void advance_cursor(bool forward);
 
 int main() {
     if (!glfwInit()) {
@@ -155,11 +159,12 @@ int main() {
 	};
 	draw_texture_scaled_tinted(bg_pos, claesz, bg_scale, (vec4){0.22f, 0.2f, 0.2f, 0.5f});
 
-	draw_string(g_text_edit_state.text_buffer,
-		    (vec2){20.0f, 50.0f},
-		    (vec4){0.8f, 0.8f, 0.8f, 1.0f},
-		    baked_font,
-		    baked_font.points_height);
+        draw_string_with_cursor(g_text_edit_state.text_buffer,
+				g_text_edit_state.text_buffer_cursor,
+				(vec2){20.0f, 50.0f},
+				(vec4){0.76f, 0.8f, 0.8f, 0.8f},
+				baked_font,
+				baked_font.points_height);
 
 	glfwSwapBuffers(g_window_state.glfw_window);
 	glfwPollEvents();
@@ -209,8 +214,14 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
 	trace_log("Received ESC. Terminating...");
 	glfwSetWindowShouldClose(window, true);
-    } else if (key == GLFW_KEY_ENTER && action == GLFW_PRESS) {
+    } else if (key == GLFW_KEY_ENTER && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
 	handle_input_char('\n');
+    } else if (key == GLFW_KEY_BACKSPACE && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+	handle_backspace_char();
+    } else if (key == GLFW_KEY_LEFT && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+	advance_cursor(false);
+    } else if (key == GLFW_KEY_RIGHT && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
+	advance_cursor(true);
     }
 }
 
@@ -619,6 +630,127 @@ void draw_string(const char *str, vec2 pos, vec4 color, Baked_Font font, float l
     }
 }
 
+void draw_string_with_cursor(const char *str, size_t cursor, vec2 pos, vec4 color, Baked_Font font, float line_height) {
+    float x = pos[0];
+    float y = pos[1];
+
+    // HACKY
+    static int frame_counter = 0;
+    static size_t prev_cursor = 0;
+    frame_counter++;
+    if (frame_counter >= 60) frame_counter = 0;
+
+    if (cursor != prev_cursor) {
+	frame_counter = 0;
+	prev_cursor = cursor;
+    }
+    bool drew_cursor = false;
+    bool will_draw_cursor =  !((frame_counter / 30) % 2);
+    size_t current_index = 0;
+    for (const char *cur = str; *cur != '\0'; cur++, current_index++) {
+	if ((uint8_t)*cur >= font.base_ascii && (uint8_t)*cur < (font.base_ascii + font.glyph_count))
+	{
+	    stbtt_bakedchar metrics = font.glyph_metrics[*cur - font.base_ascii];
+
+	    float glyph_px_w = (float)(metrics.x1 - metrics.x0);
+	    float glyph_px_h = (float)(metrics.y1 - metrics.y0);
+
+	    Rect dest = {
+		x + (float)metrics.xoff,
+		y + (float)metrics.yoff,
+		glyph_px_w,
+		glyph_px_h
+	    };
+
+	    Rect src = {
+		metrics.x0,
+		metrics.y0,
+		glyph_px_w,
+		glyph_px_h
+	    };
+
+	    if (!will_draw_cursor || current_index != cursor) {
+		draw_texture(dest, font.tex, src, color);
+	    } else {
+		Rect block_cursor = {
+		    x,
+		    y - line_height,
+		    (float)metrics.xadvance,
+		    line_height
+		};
+		draw_quad(block_cursor, color);
+		vec4 inverted_color = (vec4){1.0f - color[0], 1.0f - color[1], 1.0f - color[2], color[3]};
+		draw_texture(dest, font.tex, src, inverted_color);
+		drew_cursor = true;
+	    }
+
+	    x += (float)metrics.xadvance;
+	} else if (*cur == '\n') {
+	    if (will_draw_cursor && current_index == cursor) {
+		Rect block_cursor = {
+		    x,
+		    y - line_height,
+		    (float)10.0f,
+		    line_height
+		};
+		draw_quad(block_cursor, color);
+		drew_cursor = true;
+	    }
+
+	    x = pos[0];
+	    y += line_height;
+	} else {
+	    exit_with_error("Non-printable glyph encountered: 0x%02X\n", *cur);
+	}
+    }
+
+    if (will_draw_cursor && !drew_cursor) {
+	Rect block_cursor = {
+	    x,
+	    y - line_height,
+	    (float)10.0f,
+	    line_height
+	};
+	draw_quad(block_cursor, color);
+    }
+}
+
 void handle_input_char(uint32_t c) {
-    g_text_edit_state.text_buffer[g_text_edit_state.text_buffer_cursor++] = (char)c;
+    if (g_text_edit_state.used_size + 1 < ONE_MB) {
+	// NOTE: The null terminator at used_size will be also copied forward
+	size_t i = g_text_edit_state.used_size + 1;
+	while (i > g_text_edit_state.text_buffer_cursor) {
+	    i--;
+	    g_text_edit_state.text_buffer[i + 1] = g_text_edit_state.text_buffer[i];
+	}
+
+	g_text_edit_state.text_buffer[g_text_edit_state.text_buffer_cursor++] = (char)c;
+	g_text_edit_state.used_size++;
+    } else {
+	trace_log("Text buffer is full at %d bytes out of %d.", g_text_edit_state.used_size, ONE_MB);
+    }
+}
+
+void handle_backspace_char() {
+    if (g_text_edit_state.text_buffer_cursor > 0) {
+	// NOTE: Include used_size as well, to move back the null terminator
+	//       Note that it could be possible to delete more than one char at a time later on.
+	//       So even if buffer is zero-initialized, not carrying the null terminator would be a problem.
+	for (size_t i = g_text_edit_state.text_buffer_cursor; i <= g_text_edit_state.used_size; i++) {
+	    g_text_edit_state.text_buffer[i - 1] = g_text_edit_state.text_buffer[i];
+	}
+
+	g_text_edit_state.used_size--;
+	g_text_edit_state.text_buffer_cursor--;
+    }
+}
+
+void advance_cursor(bool forward) {
+    if (forward) {
+	g_text_edit_state.text_buffer_cursor++;
+	if (g_text_edit_state.text_buffer_cursor > g_text_edit_state.used_size)
+	    g_text_edit_state.text_buffer_cursor = g_text_edit_state.used_size;
+    } else if (g_text_edit_state.text_buffer_cursor > 0) {
+	g_text_edit_state.text_buffer_cursor--;
+    }
 }
