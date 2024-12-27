@@ -57,6 +57,8 @@ typedef struct Text_Edit_State {
     char text_buffer[ONE_MB];
     size_t text_buffer_cursor;
     size_t used_size;
+    const char *file_name;
+    int notify_frames;
 } Text_Edit_State;
 
 static Gl_State g_gl_state;
@@ -97,10 +99,12 @@ void draw_string_with_cursor(const char *str, size_t cursor, vec2 pos, vec4 colo
 void handle_input_char(uint32_t c);
 void handle_backspace_char();
 void advance_cursor(bool forward);
+void save_file();
+void try_load_file();
 
-int main() {
+int main(int argc, char **argv) {
     if (!glfwInit()) {
-	exit_with_error("Failed to initialize GLFW");
+        exit_with_error("Failed to initialize GLFW");
     }
 
     trace_log("GLFW initialized");
@@ -114,7 +118,7 @@ int main() {
     g_window_state.h = SCREEN_HEIGHT;
     g_window_state.glfw_window = glfwCreateWindow(g_window_state.w, g_window_state.h, "Text Edit Proto", NULL, NULL);
     if (g_window_state.glfw_window == NULL) {
-	exit_with_error("Failed to create GLFW window");
+        exit_with_error("Failed to create GLFW window");
     }
 
     trace_log("GLFW window created");
@@ -122,7 +126,7 @@ int main() {
     glfwMakeContextCurrent(g_window_state.glfw_window);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
-	exit_with_error("Failed to load GL function pointers");
+        exit_with_error("Failed to load GL function pointers");
     }
 
     trace_log("Loaded OpenGL function pointers. Debug info:");
@@ -148,26 +152,42 @@ int main() {
     Texture claesz = load_texture("res/claesz.png");
     Baked_Font baked_font = bake_font_to_texture("res/ubuntu_mono.ttf", 32.0f, 512);
 
+    if (argc < 2) {
+        g_text_edit_state.file_name = "temp/from_editor.c";
+    } else {
+        g_text_edit_state.file_name = argv[1];
+    }
+
+    try_load_file();
+
+    trace_log("Editing file: %s", g_text_edit_state.file_name);
+
     trace_log("Entering main loop");
     while (!glfwWindowShouldClose(g_window_state.glfw_window)) {
-	glClear(GL_COLOR_BUFFER_BIT);
+        glClear(GL_COLOR_BUFFER_BIT);
 
-	float bg_scale = 0.7f;
-	vec2 bg_pos = {
-	    g_window_state.w * 0.5f - claesz.w * bg_scale * 0.5f,
-	    g_window_state.h * 0.5f - claesz.h * bg_scale * 0.5f
-	};
-	draw_texture_scaled_tinted(bg_pos, claesz, bg_scale, (vec4){0.22f, 0.2f, 0.2f, 0.5f});
+        float bg_scale = 0.7f;
+        vec2 bg_pos = {
+            g_window_state.w * 0.5f - claesz.w * bg_scale * 0.5f,
+            g_window_state.h * 0.5f - claesz.h * bg_scale * 0.5f
+        };
+        draw_texture_scaled_tinted(bg_pos, claesz, bg_scale, (vec4){0.22f, 0.2f, 0.2f, 0.5f});
 
         draw_string_with_cursor(g_text_edit_state.text_buffer,
-				g_text_edit_state.text_buffer_cursor,
-				(vec2){20.0f, 50.0f},
-				(vec4){0.76f, 0.8f, 0.8f, 0.8f},
-				baked_font,
-				baked_font.points_height);
+                                g_text_edit_state.text_buffer_cursor,
+                                (vec2){20.0f, 50.0f},
+                                (vec4){0.76f, 0.8f, 0.8f, 0.8f},
+                                baked_font,
+                                baked_font.points_height);
 
-	glfwSwapBuffers(g_window_state.glfw_window);
-	glfwPollEvents();
+        if (g_text_edit_state.notify_frames > 0) {
+            g_text_edit_state.notify_frames--;
+            float dim = 50.0f;
+            draw_quad((Rect){g_window_state.w - dim, g_window_state.h - dim, dim, dim}, (vec4){0.6f, 0.55f, 0.55f, 0.6f});
+        }
+
+        glfwSwapBuffers(g_window_state.glfw_window);
+        glfwPollEvents();
     }
 
     trace_log("GLFW terminating gracefully");
@@ -212,25 +232,27 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
     (void)window; (void)key; (void)scancode; (void)action; (void)mods;
 
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-	trace_log("Received ESC. Terminating...");
-	glfwSetWindowShouldClose(window, true);
+        trace_log("Received ESC. Terminating...");
+        glfwSetWindowShouldClose(window, true);
     } else if (key == GLFW_KEY_ENTER && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-	handle_input_char('\n');
+        handle_input_char('\n');
     } else if (key == GLFW_KEY_BACKSPACE && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-	handle_backspace_char();
+        handle_backspace_char();
     } else if (key == GLFW_KEY_LEFT && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-	advance_cursor(false);
+        advance_cursor(false);
     } else if (key == GLFW_KEY_RIGHT && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-	advance_cursor(true);
+        advance_cursor(true);
+    } else if (key == GLFW_KEY_S && (action == GLFW_PRESS) && (mods & GLFW_MOD_CONTROL)) {
+        save_file();
     }
 }
 
 void char_callback(GLFWwindow* window, uint32_t codepoint) {
     (void)window;
     if (codepoint < 0x100) {
-	handle_input_char(codepoint);
+        handle_input_char(codepoint);
     } else {
-	trace_log("Unhandled codepoint: 0x%08X", codepoint);
+        trace_log("Unhandled codepoint: 0x%08X", codepoint);
     }
 }
 
@@ -253,8 +275,8 @@ uint32_t build_shader_from_src(const char *src, GLenum shader_type) {
     glGetShaderiv(id, GL_COMPILE_STATUS, &success);
 
     if (!success) {
-	glGetShaderInfoLog(id, ONE_MB, NULL, gl_error_buffer);
-	exit_with_error("Failed to compile shader (type 0x%04X). Error:\n  %s\nSource:\n%s\n", shader_type, gl_error_buffer, src);
+        glGetShaderInfoLog(id, ONE_MB, NULL, gl_error_buffer);
+        exit_with_error("Failed to compile shader (type 0x%04X). Error:\n  %s\nSource:\n%s\n", shader_type, gl_error_buffer, src);
     }
 
     return id;
@@ -270,8 +292,8 @@ uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag) {
     glGetProgramiv(id, GL_LINK_STATUS, &success);
 
     if (!success) {
-	glGetProgramInfoLog(id, ONE_MB, NULL, gl_error_buffer);
-	exit_with_error("Failed to compile program. Error:\n  %s", gl_error_buffer);
+        glGetProgramInfoLog(id, ONE_MB, NULL, gl_error_buffer);
+        exit_with_error("Failed to compile program. Error:\n  %s", gl_error_buffer);
     }
 
     return id;
@@ -279,29 +301,29 @@ uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag) {
 
 uint32_t build_default_shaders() {
     static const char *vert_shader_source =
-	"#version 430 core\n"
-	"layout (location = 0) in vec2 aPos;\n"
-	"layout (location = 1) in vec2 aTexCoord;\n"
-	"layout (location = 2) in vec4 aColor;\n"
-	"uniform mat4 projection;\n"
-	"out vec2 TexCoord;\n"
-	"out vec4 Color;\n"
-	"void main() {\n"
-	"    gl_Position = projection * vec4(aPos, 0.0, 1.0);\n"
-	"    TexCoord = aTexCoord;\n"
-	"    Color = aColor;\n"
-	"}";
+        "#version 430 core\n"
+        "layout (location = 0) in vec2 aPos;\n"
+        "layout (location = 1) in vec2 aTexCoord;\n"
+        "layout (location = 2) in vec4 aColor;\n"
+        "uniform mat4 projection;\n"
+        "out vec2 TexCoord;\n"
+        "out vec4 Color;\n"
+        "void main() {\n"
+        "    gl_Position = projection * vec4(aPos, 0.0, 1.0);\n"
+        "    TexCoord = aTexCoord;\n"
+        "    Color = aColor;\n"
+        "}";
     uint32_t vert_shader = build_shader_from_src(vert_shader_source, GL_VERTEX_SHADER);
 
     static const char *frag_shader_source =
-	"#version 430 core\n"
-	"out vec4 FragColor;\n"
-	"in vec2 TexCoord;\n"
-	"in vec4 Color;\n"
-	"uniform sampler2D texture1;\n"
-	"void main() {\n"
-	"    FragColor = Color * texture(texture1, TexCoord);\n"
-	"}";
+        "#version 430 core\n"
+        "out vec4 FragColor;\n"
+        "in vec2 TexCoord;\n"
+        "in vec4 Color;\n"
+        "uniform sampler2D texture1;\n"
+        "void main() {\n"
+        "    FragColor = Color * texture(texture1, TexCoord);\n"
+        "}";
     uint32_t frag_shader = build_shader_from_src(frag_shader_source, GL_FRAGMENT_SHADER);
 
     uint32_t shader_program = link_vert_frag_shaders(vert_shader, frag_shader);
@@ -386,7 +408,7 @@ Texture load_texture(const char *file) {
     int width, height, channel_count;
     uint8_t *image_data = stbi_load(file, &width, &height, &channel_count, STBI_rgb_alpha);
     if (image_data == NULL) {
-	exit_with_error("Failed to load image at %s", file);
+        exit_with_error("Failed to load image at %s", file);
     }
 
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
@@ -435,10 +457,10 @@ void draw_texture(Rect dest, Texture texture, Rect src, vec4 color) {
     offset = 0;
     stride = 2 * sizeof(float);
     float positions[] = {
-	dest.x, dest.y,
-	dest.x + dest.w, dest.y,
-	dest.x, dest.y + dest.h,
-	dest.x + dest.w, dest.y + dest.h
+        dest.x, dest.y,
+        dest.x + dest.w, dest.y,
+        dest.x, dest.y + dest.h,
+        dest.x + dest.w, dest.y + dest.h
     };
     assert(sizeof(positions) == stride * vert_to_sub_count);
     glBufferSubData(GL_ARRAY_BUFFER, offset, sizeof(positions), positions);
@@ -448,10 +470,10 @@ void draw_texture(Rect dest, Texture texture, Rect src, vec4 color) {
     stride = 2 * sizeof(float);
     Rect src_norm = (Rect){src.x / texture.w, src.y / texture.h, src.w / texture.w, src.h / texture.h};
     float tex_coords[] = {
-	src_norm.x, src_norm.y,
-	src_norm.x + src_norm.w, src_norm.y,
-	src_norm.x, src_norm.y + src_norm.h,
-	src_norm.x + src_norm.w, src_norm.y + src_norm.h
+        src_norm.x, src_norm.y,
+        src_norm.x + src_norm.w, src_norm.y,
+        src_norm.x, src_norm.y + src_norm.h,
+        src_norm.x + src_norm.w, src_norm.y + src_norm.h
     };
     assert(sizeof(tex_coords) == stride * vert_to_sub_count);
     glBufferSubData(GL_ARRAY_BUFFER, offset, sizeof(tex_coords), tex_coords);
@@ -472,8 +494,8 @@ void draw_texture(Rect dest, Texture texture, Rect src, vec4 color) {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gl_state.ebo);
 
     uint32_t indices[] = {
-	2, 1, 0,
-	2, 3, 1
+        2, 1, 0,
+        2, 3, 1
     };
     assert(sizeof(indices) / sizeof(indices[0]) == idx_to_sub_count);
     glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, sizeof(indices), indices);
@@ -495,18 +517,18 @@ void draw_texture_scaled(vec2 pos, Texture texture, float scale) {
     vec2 size = {texture.w, texture.h};
     glm_vec2_scale(size, scale, size);
     draw_texture((Rect){pos[0], pos[1], size[0], size[1]},
-		 texture,
-		 (Rect){0.0f, 0.0f, texture.w, texture.h},
-		 (vec4){1.0f, 1.0f, 1.0f, 1.0f});
+                 texture,
+                 (Rect){0.0f, 0.0f, texture.w, texture.h},
+                 (vec4){1.0f, 1.0f, 1.0f, 1.0f});
 }
 
 void draw_texture_scaled_tinted(vec2 pos, Texture texture, float scale, vec4 color) {
     vec2 size = {texture.w, texture.h};
     glm_vec2_scale(size, scale, size);
     draw_texture((Rect){pos[0], pos[1], size[0], size[1]},
-		 texture,
-		 (Rect){0.0f, 0.0f, texture.w, texture.h},
-		 color);
+                 texture,
+                 (Rect){0.0f, 0.0f, texture.w, texture.h},
+                 color);
 }
 
 void draw_quad(Rect quad, vec4 color) {
@@ -533,8 +555,8 @@ Baked_Font bake_font(const char *file_name, float points_height, int atlas_dim) 
     uint8_t *atlas_gray_bytes = xcalloc(pixel_count);
 
     int result = stbtt_BakeFontBitmap(font_bytes, 0, points_height,
-				      atlas_gray_bytes, atlas_dim, atlas_dim,
-				      baked_font.base_ascii, baked_font.glyph_count, baked_font.glyph_metrics);
+                                      atlas_gray_bytes, atlas_dim, atlas_dim,
+                                      baked_font.base_ascii, baked_font.glyph_count, baked_font.glyph_metrics);
     if (result <= 0) exit_with_error("Failed to bake font bitmap. stbtt_BakeFontBitmap(...) = %d", result);
 
     free(font_bytes);
@@ -542,10 +564,10 @@ Baked_Font bake_font(const char *file_name, float points_height, int atlas_dim) 
     uint8_t *atlas_rgba_bytes = xmalloc(pixel_count * 4);
 
     for (size_t i = 0; i < pixel_count; i++) {
-	atlas_rgba_bytes[i * 4 + 0] = atlas_gray_bytes[i];
-	atlas_rgba_bytes[i * 4 + 1] = atlas_gray_bytes[i];
-	atlas_rgba_bytes[i * 4 + 2] = atlas_gray_bytes[i];
-	atlas_rgba_bytes[i * 4 + 3] = atlas_gray_bytes[i];
+        atlas_rgba_bytes[i * 4 + 0] = atlas_gray_bytes[i];
+        atlas_rgba_bytes[i * 4 + 1] = atlas_gray_bytes[i];
+        atlas_rgba_bytes[i * 4 + 2] = atlas_gray_bytes[i];
+        atlas_rgba_bytes[i * 4 + 3] = atlas_gray_bytes[i];
     }
 
     free(atlas_gray_bytes);
@@ -561,13 +583,13 @@ Baked_Font bake_font(const char *file_name, float points_height, int atlas_dim) 
 void test_bake_font_to_png(const char *font_file_name, const char *out_png_file_name, float points_height, int atlas_dim) {
     Baked_Font baked_font = bake_font(font_file_name, points_height, atlas_dim);
     int write_png_result = stbi_write_png(out_png_file_name,
-					  atlas_dim,
-					  atlas_dim,
-					  1,
-					  baked_font.rgba_bytes,
-					  atlas_dim);
+                                          atlas_dim,
+                                          atlas_dim,
+                                          1,
+                                          baked_font.rgba_bytes,
+                                          atlas_dim);
     if (!write_png_result) {
-	exit_with_error("Failed to write baked atlas to %s", out_png_file_name);
+        exit_with_error("Failed to write baked atlas to %s", out_png_file_name);
     }
     trace_log("test_bake_font_to_png: wrote baked atlas png to %s", out_png_file_name);
     free(baked_font.rgba_bytes);
@@ -597,36 +619,36 @@ void draw_string(const char *str, vec2 pos, vec4 color, Baked_Font font, float l
     float y = pos[1];
 
     for (const char *cur = str; *cur != '\0'; cur++) {
-	if ((uint8_t)*cur >= font.base_ascii && (uint8_t)*cur < (font.base_ascii + font.glyph_count))
-	{
-	    stbtt_bakedchar metrics = font.glyph_metrics[*cur - font.base_ascii];
+        if ((uint8_t)*cur >= font.base_ascii && (uint8_t)*cur < (font.base_ascii + font.glyph_count))
+        {
+            stbtt_bakedchar metrics = font.glyph_metrics[*cur - font.base_ascii];
 
-	    float glyph_px_w = (float)(metrics.x1 - metrics.x0);
-	    float glyph_px_h = (float)(metrics.y1 - metrics.y0);
+            float glyph_px_w = (float)(metrics.x1 - metrics.x0);
+            float glyph_px_h = (float)(metrics.y1 - metrics.y0);
 
-	    Rect dest = {
-		x + (float)metrics.xoff,
-		y + (float)metrics.yoff,
-		glyph_px_w,
-		glyph_px_h
-	    };
+            Rect dest = {
+                x + (float)metrics.xoff,
+                y + (float)metrics.yoff,
+                glyph_px_w,
+                glyph_px_h
+            };
 
-	    Rect src = {
-		metrics.x0,
-		metrics.y0,
-		glyph_px_w,
-		glyph_px_h
-	    };
+            Rect src = {
+                metrics.x0,
+                metrics.y0,
+                glyph_px_w,
+                glyph_px_h
+            };
 
-	    draw_texture(dest, font.tex, src, color);
+            draw_texture(dest, font.tex, src, color);
 
-	    x += (float)metrics.xadvance;
-	} else if (*cur == '\n') {
-	    x = pos[0];
-	    y += line_height;
-	} else {
-	    exit_with_error("Non-printable glyph encountered: 0x%02X\n", *cur);
-	}
+            x += (float)metrics.xadvance;
+        } else if (*cur == '\n') {
+            x = pos[0];
+            y += line_height;
+        } else {
+            exit_with_error("Non-printable glyph encountered: 0x%02X\n", *cur);
+        }
     }
 }
 
@@ -641,116 +663,139 @@ void draw_string_with_cursor(const char *str, size_t cursor, vec2 pos, vec4 colo
     if (frame_counter >= 60) frame_counter = 0;
 
     if (cursor != prev_cursor) {
-	frame_counter = 0;
-	prev_cursor = cursor;
+        frame_counter = 0;
+        prev_cursor = cursor;
     }
     bool drew_cursor = false;
     bool will_draw_cursor =  !((frame_counter / 30) % 2);
     size_t current_index = 0;
     for (const char *cur = str; *cur != '\0'; cur++, current_index++) {
-	if ((uint8_t)*cur >= font.base_ascii && (uint8_t)*cur < (font.base_ascii + font.glyph_count))
-	{
-	    stbtt_bakedchar metrics = font.glyph_metrics[*cur - font.base_ascii];
+        if ((uint8_t)*cur >= font.base_ascii && (uint8_t)*cur < (font.base_ascii + font.glyph_count))
+        {
+            stbtt_bakedchar metrics = font.glyph_metrics[*cur - font.base_ascii];
 
-	    float glyph_px_w = (float)(metrics.x1 - metrics.x0);
-	    float glyph_px_h = (float)(metrics.y1 - metrics.y0);
+            float glyph_px_w = (float)(metrics.x1 - metrics.x0);
+            float glyph_px_h = (float)(metrics.y1 - metrics.y0);
 
-	    Rect dest = {
-		x + (float)metrics.xoff,
-		y + (float)metrics.yoff,
-		glyph_px_w,
-		glyph_px_h
-	    };
+            Rect dest = {
+                x + (float)metrics.xoff,
+                y + (float)metrics.yoff,
+                glyph_px_w,
+                glyph_px_h
+            };
 
-	    Rect src = {
-		metrics.x0,
-		metrics.y0,
-		glyph_px_w,
-		glyph_px_h
-	    };
+            Rect src = {
+                metrics.x0,
+                metrics.y0,
+                glyph_px_w,
+                glyph_px_h
+            };
 
-	    if (!will_draw_cursor || current_index != cursor) {
-		draw_texture(dest, font.tex, src, color);
-	    } else {
-		Rect block_cursor = {
-		    x,
-		    y - line_height,
-		    (float)metrics.xadvance,
-		    line_height
-		};
-		draw_quad(block_cursor, color);
-		vec4 inverted_color = (vec4){1.0f - color[0], 1.0f - color[1], 1.0f - color[2], color[3]};
-		draw_texture(dest, font.tex, src, inverted_color);
-		drew_cursor = true;
-	    }
+            if (!will_draw_cursor || current_index != cursor) {
+                draw_texture(dest, font.tex, src, color);
+            } else {
+                Rect block_cursor = {
+                    x,
+                    y - line_height,
+                    (float)metrics.xadvance,
+                    line_height
+                };
+                draw_quad(block_cursor, color);
+                vec4 inverted_color = (vec4){1.0f - color[0], 1.0f - color[1], 1.0f - color[2], color[3]};
+                draw_texture(dest, font.tex, src, inverted_color);
+                drew_cursor = true;
+            }
 
-	    x += (float)metrics.xadvance;
-	} else if (*cur == '\n') {
-	    if (will_draw_cursor && current_index == cursor) {
-		Rect block_cursor = {
-		    x,
-		    y - line_height,
-		    (float)10.0f,
-		    line_height
-		};
-		draw_quad(block_cursor, color);
-		drew_cursor = true;
-	    }
+            x += (float)metrics.xadvance;
+        } else if (*cur == '\n') {
+            if (will_draw_cursor && current_index == cursor) {
+                Rect block_cursor = {
+                    x,
+                    y - line_height,
+                    (float)10.0f,
+                    line_height
+                };
+                draw_quad(block_cursor, color);
+                drew_cursor = true;
+            }
 
-	    x = pos[0];
-	    y += line_height;
-	} else {
-	    exit_with_error("Non-printable glyph encountered: 0x%02X\n", *cur);
-	}
+            x = pos[0];
+            y += line_height;
+        } else {
+            trace_log("Non-printable glyph encountered: 0x%02X at %d\n", *cur, current_index);
+        }
     }
 
     if (will_draw_cursor && !drew_cursor) {
-	Rect block_cursor = {
-	    x,
-	    y - line_height,
-	    (float)10.0f,
-	    line_height
-	};
-	draw_quad(block_cursor, color);
+        Rect block_cursor = {
+            x,
+            y - line_height,
+            (float)10.0f,
+            line_height
+        };
+        draw_quad(block_cursor, color);
     }
 }
 
 void handle_input_char(uint32_t c) {
     if (g_text_edit_state.used_size + 1 < ONE_MB) {
-	// NOTE: The null terminator at used_size will be also copied forward
-	size_t i = g_text_edit_state.used_size + 1;
-	while (i > g_text_edit_state.text_buffer_cursor) {
-	    i--;
-	    g_text_edit_state.text_buffer[i + 1] = g_text_edit_state.text_buffer[i];
-	}
+        // NOTE: The null terminator at used_size will be also copied forward
+        size_t i = g_text_edit_state.used_size + 1;
+        while (i > g_text_edit_state.text_buffer_cursor) {
+            i--;
+            g_text_edit_state.text_buffer[i + 1] = g_text_edit_state.text_buffer[i];
+        }
 
-	g_text_edit_state.text_buffer[g_text_edit_state.text_buffer_cursor++] = (char)c;
-	g_text_edit_state.used_size++;
+        g_text_edit_state.text_buffer[g_text_edit_state.text_buffer_cursor++] = (char)c;
+        g_text_edit_state.used_size++;
     } else {
-	trace_log("Text buffer is full at %d bytes out of %d.", g_text_edit_state.used_size, ONE_MB);
+        trace_log("Text buffer is full at %d bytes out of %d.", g_text_edit_state.used_size, ONE_MB);
     }
 }
 
 void handle_backspace_char() {
     if (g_text_edit_state.text_buffer_cursor > 0) {
-	// NOTE: Include used_size as well, to move back the null terminator
-	//       Note that it could be possible to delete more than one char at a time later on.
-	//       So even if buffer is zero-initialized, not carrying the null terminator would be a problem.
-	for (size_t i = g_text_edit_state.text_buffer_cursor; i <= g_text_edit_state.used_size; i++) {
-	    g_text_edit_state.text_buffer[i - 1] = g_text_edit_state.text_buffer[i];
-	}
+        // NOTE: Include used_size as well, to move back the null terminator
+        //       Note that it could be possible to delete more than one char at a time later on.
+        //       So even if buffer is zero-initialized, not carrying the null terminator would be a problem.
+        for (size_t i = g_text_edit_state.text_buffer_cursor; i <= g_text_edit_state.used_size; i++) {
+            g_text_edit_state.text_buffer[i - 1] = g_text_edit_state.text_buffer[i];
+        }
 
-	g_text_edit_state.used_size--;
-	g_text_edit_state.text_buffer_cursor--;
+        g_text_edit_state.used_size--;
+        g_text_edit_state.text_buffer_cursor--;
     }
 }
 
 void advance_cursor(bool forward) {
     if (forward) {
-	g_text_edit_state.text_buffer_cursor++;
-	if (g_text_edit_state.text_buffer_cursor > g_text_edit_state.used_size)
-	    g_text_edit_state.text_buffer_cursor = g_text_edit_state.used_size;
+        g_text_edit_state.text_buffer_cursor++;
+        if (g_text_edit_state.text_buffer_cursor > g_text_edit_state.used_size)
+            g_text_edit_state.text_buffer_cursor = g_text_edit_state.used_size;
     } else if (g_text_edit_state.text_buffer_cursor > 0) {
-	g_text_edit_state.text_buffer_cursor--;
+        g_text_edit_state.text_buffer_cursor--;
     }
+}
+
+void save_file() {
+    FILE *file = fopen(g_text_edit_state.file_name, "w+");
+    if (!file) {
+        exit_with_error("Not able to open file for saving: %s", g_text_edit_state.file_name);
+    }
+    fprintf(file, "%s", g_text_edit_state.text_buffer);
+    fclose(file);
+    g_text_edit_state.notify_frames = 30;
+}
+
+void try_load_file() {
+    FILE *file = fopen(g_text_edit_state.file_name, "r");
+    if (!file) {
+        trace_log("File doesn't exist. Will create new file: %s.", g_text_edit_state.file_name);
+        return;
+    }
+
+    size_t bytes_copied = fread(g_text_edit_state.text_buffer, 1, ONE_MB, file);
+    g_text_edit_state.used_size = bytes_copied;
+
+    trace_log("Read %d bytes from file: %s.", bytes_copied, g_text_edit_state.file_name);
 }
