@@ -18,7 +18,7 @@
 
 enum { SCREEN_WIDTH = 800, SCREEN_HEIGHT = 600 };
 enum { MAX_VERT = 1024, MAX_IDX = 4096 };
-enum { GL_ERROR_BUFFER_MAX_LENGTH = 1024 * 1024 };
+enum { ONE_MB = 1024 * 1024 };
 enum { BAKED_BASE_ASCII = 32, BAKED_GLYPH_COUNT = 95 }; // ASCII Range: [32, 126]
 
 typedef struct Texture {
@@ -53,9 +53,15 @@ typedef struct Baked_Font {
     float points_height;
 } Baked_Font;
 
+typedef struct Text_Edit_State {
+    char text_buffer[ONE_MB];
+    size_t text_buffer_cursor;
+} Text_Edit_State;
+
 static Gl_State g_gl_state;
 static Window_State g_window_state;
-static char gl_error_buffer[GL_ERROR_BUFFER_MAX_LENGTH];
+static char gl_error_buffer[ONE_MB];
+static Text_Edit_State  g_text_edit_state = {0};
 
 void exit_with_error(const char *msg, ...);
 void trace_log(const char *msg, ...);
@@ -63,6 +69,7 @@ void *xmalloc(size_t bytes);
 void *xcalloc(size_t bytes);
 
 void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, int mods);
+void char_callback(GLFWwindow* window, uint32_t codepoint);
 void window_size_callback(GLFWwindow *window, int width, int height);
 
 uint32_t build_shader_from_src(const char *src, GLenum shader_type);
@@ -84,6 +91,8 @@ Baked_Font bake_font(const char *file_name, float points_height, int atlas_dim);
 void test_bake_font_to_png(const char *font_file_name, const char *out_png_file_name, float points_height, int atlas_dim);
 Baked_Font bake_font_to_texture(const char *file, float points_height, int atlas_dim);
 void draw_string(const char *str, vec2 pos, vec4 color, Baked_Font font, float line_height);
+
+void handle_input_char(uint32_t c);
 
 int main() {
     if (!glfwInit()) {
@@ -120,7 +129,7 @@ int main() {
 
     glfwSetKeyCallback(g_window_state.glfw_window, keyboard_callback);
     glfwSetWindowSizeCallback(g_window_state.glfw_window, window_size_callback);
-
+    glfwSetCharCallback(g_window_state.glfw_window, char_callback);
     g_gl_state = initialize_gl_state();
 
     glEnable(GL_BLEND);
@@ -146,7 +155,7 @@ int main() {
 	};
 	draw_texture_scaled_tinted(bg_pos, claesz, bg_scale, (vec4){0.22f, 0.2f, 0.2f, 0.5f});
 
-	draw_string("Hello Big World!\nGoodbye Small Universe?",
+	draw_string(g_text_edit_state.text_buffer,
 		    (vec2){20.0f, 50.0f},
 		    (vec4){0.8f, 0.8f, 0.8f, 1.0f},
 		    baked_font,
@@ -200,6 +209,17 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
 	trace_log("Received ESC. Terminating...");
 	glfwSetWindowShouldClose(window, true);
+    } else if (key == GLFW_KEY_ENTER && action == GLFW_PRESS) {
+	handle_input_char('\n');
+    }
+}
+
+void char_callback(GLFWwindow* window, uint32_t codepoint) {
+    (void)window;
+    if (codepoint < 0x100) {
+	handle_input_char(codepoint);
+    } else {
+	trace_log("Unhandled codepoint: 0x%08X", codepoint);
     }
 }
 
@@ -222,7 +242,7 @@ uint32_t build_shader_from_src(const char *src, GLenum shader_type) {
     glGetShaderiv(id, GL_COMPILE_STATUS, &success);
 
     if (!success) {
-	glGetShaderInfoLog(id, GL_ERROR_BUFFER_MAX_LENGTH, NULL, gl_error_buffer);
+	glGetShaderInfoLog(id, ONE_MB, NULL, gl_error_buffer);
 	exit_with_error("Failed to compile shader (type 0x%04X). Error:\n  %s\nSource:\n%s\n", shader_type, gl_error_buffer, src);
     }
 
@@ -239,7 +259,7 @@ uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag) {
     glGetProgramiv(id, GL_LINK_STATUS, &success);
 
     if (!success) {
-	glGetProgramInfoLog(id, GL_ERROR_BUFFER_MAX_LENGTH, NULL, gl_error_buffer);
+	glGetProgramInfoLog(id, ONE_MB, NULL, gl_error_buffer);
 	exit_with_error("Failed to compile program. Error:\n  %s", gl_error_buffer);
     }
 
@@ -597,4 +617,8 @@ void draw_string(const char *str, vec2 pos, vec4 color, Baked_Font font, float l
 	    exit_with_error("Non-printable glyph encountered: 0x%02X\n", *cur);
 	}
     }
+}
+
+void handle_input_char(uint32_t c) {
+    g_text_edit_state.text_buffer[g_text_edit_state.text_buffer_cursor++] = (char)c;
 }
