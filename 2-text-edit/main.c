@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "cglm/cglm.h"
 #include "glad/glad.h"
 #include <GLFW/glfw3.h>
 
@@ -15,19 +16,54 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb/stb_truetype.h"
 
-static uint32_t texture;
-static uint32_t vao;
-static uint32_t shader_program_id;
+enum { SCREEN_WIDTH = 800, SCREEN_HEIGHT = 600 };
+enum { MAX_VERT = 1024, MAX_IDX = 4096 };
+enum { GL_ERROR_BUFFER_MAX_LENGTH = 1024 * 1024 };
 
-void exit_with_error(const char *msg);
+typedef struct Texture {
+    uint32_t id;
+    float w, h;
+} Texture;
+
+typedef struct Rect {
+    float x, y;
+    float w, h;
+} Rect;
+
+typedef struct Gl_State {
+    uint32_t vbo;
+    uint32_t ebo;
+    uint32_t vao;
+    uint32_t shader;
+    Texture empty_texture;
+} Gl_State;
+
+static Gl_State g_gl_state;
+static char gl_error_buffer[GL_ERROR_BUFFER_MAX_LENGTH];
+
+void exit_with_error(const char *msg, ...);
 void trace_log(const char *msg, ...);
 
 void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, int mods);
+void window_size_callback(GLFWwindow *window, int width, int height);
 
-void bake_font_test();
+uint32_t build_shader_from_src(const char *src, GLenum shader_type);
+uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag);
+uint32_t build_default_shaders();
 
-void initialize_gl();
-void draw();
+Gl_State initialize_gl_state();
+void set_ortho_projection(int width, int height);
+
+Texture load_texture(const char *file);
+Texture load_empty_texture();
+Texture load_font_atlas_texture(const char *file, uint32_t atlas_dim);
+
+void draw_texture(Rect dest, Texture texture, Rect src, vec4 color);
+void draw_quad(Rect quad, vec4 color);
+void draw_scaled_texture(vec2 pos, Texture texture, float scale);
+
+uint8_t *bake_font(const char *file_name, int atlas_dim);
+void test_bake_font_to_png(const char *font_file_name, const char *out_png_file_name);
 
 int main() {
     if (!glfwInit()) {
@@ -41,7 +77,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* glfw_window = glfwCreateWindow(800, 600, "Text Edit Proto", NULL, NULL);
+    GLFWwindow* glfw_window = glfwCreateWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Text Edit Proto", NULL, NULL);
     if (glfw_window == NULL) {
 	exit_with_error("Failed to create GLFW window");
     }
@@ -61,15 +97,37 @@ int main() {
     trace_log("  Renderer: %s", glGetString(GL_RENDERER));
 
     glfwSetKeyCallback(glfw_window, keyboard_callback);
+    glfwSetWindowSizeCallback(glfw_window, window_size_callback);
 
-    initialize_gl();
-    
+    g_gl_state = initialize_gl_state();
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+    glClearColor(0.3f, 0.0f, 0.0f, 1.0f);
+
+    set_ortho_projection(SCREEN_WIDTH, SCREEN_HEIGHT);
+
+    Texture claesz = load_texture("res/claesz.png");
+    Texture font_atlas = load_font_atlas_texture("res/ubuntu_mono.ttf", 512);
+
+    /* test_bake_font_to_png("res/ubuntu_mono.ttf", "temp/baked_font.png"); */
+
     trace_log("Entering main loop");
-
-    bake_font_test();
-
     while (!glfwWindowShouldClose(glfw_window)) {
-	draw();
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	draw_scaled_texture((vec2){5.0f, 5.0f}, claesz, 0.7f);
+
+	draw_quad((Rect){200.0f, 290.0f, 50.0f, 50.0f}, (vec4){0.0f, 1.0f, 0.0f, 0.5f});
+
+	draw_scaled_texture((vec2){50.0f, 50.0f}, font_atlas, 4.0f);
+
+	Rect glyph_rect = (Rect){16.0f, 31.0f, 30.0 - 16.0f, 51.0f - 31.0f}; //x0 = 16, y0 = 31, x1 = 30, y1 = 51
+	draw_texture((Rect){10.0f, 10.0f, glyph_rect.w, glyph_rect.h},
+		     font_atlas,
+		     glyph_rect,
+		     (vec4){1.0f, 0.0f, 1.0f, 0.5f});
 
 	glfwSwapBuffers(glfw_window);
 	glfwPollEvents();
@@ -81,8 +139,14 @@ int main() {
     return 0;
 }
 
-void exit_with_error(const char *msg) {
-    fprintf(stderr, "FATAL: %s\n", msg);
+void exit_with_error(const char *msg, ...) {
+    fprintf(stderr, "FATAL: ");
+    va_list ap;
+    va_start(ap, msg);
+    vfprintf(stderr, msg, ap);
+    va_end(ap);
+    fprintf(stderr, "\n");
+
     glfwTerminate();
     exit(1);
 }
@@ -105,110 +169,157 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
     }
 }
 
-void bake_font_test() {
-    FILE *font_file = fopen("res/ubuntu_mono.ttf", "rb");
-    if (!font_file) {
-	exit_with_error("Failed to load font at res/ubuntu_mono.ttf");
-    }
+void window_size_callback(GLFWwindow *window, int width, int height) {
+    (void)window;
 
-    fseek(font_file, 0, SEEK_END);
-    size_t font_size = ftell(font_file);
-    rewind(font_file);
-
-    uint8_t *font_buffer = malloc(font_size);
-    fread(font_buffer, 1, font_size, font_file);
-    fclose(font_file);
-
-    enum { ATLAS_DIM = 1024 };
-    uint8_t *atlas_bytes = calloc(1, ATLAS_DIM * ATLAS_DIM);
-
-    stbtt_bakedchar char_data[95]; // ASCII Range: [32, 126]
-    int result = stbtt_BakeFontBitmap(font_buffer, 0, 32.0f,
-				      atlas_bytes, ATLAS_DIM, ATLAS_DIM,
-				      32, 95, char_data);
-    free(font_buffer);
-
-    if (result <= 0) {
-	exit_with_error("Failed to bake font bitmap");
-    }
-
-    int write_png_result = stbi_write_png("temp/baked_font.png", ATLAS_DIM, ATLAS_DIM, 1, atlas_bytes, ATLAS_DIM);
-    if (!write_png_result) {
-	exit_with_error("Failed to write baked atlas to temp/baked_font.png");
-    }
-
-    trace_log("Bake Font Test: wrote baked atlas png to temp/baked_font.png");
+    glViewport(0, 0, width, height);
+    set_ortho_projection(width, height);
 }
 
-void initialize_gl() {
-    static float quad_vertices[] = {
-	// Positions         // Texture Coords
-	-0.5f, -0.5f, 0.0f,  0.0f, 0.0f,  // Bottom-left
-	 0.5f, -0.5f, 0.0f,  1.0f, 0.0f,  // Bottom-right
-	 0.5f,  0.5f, 0.0f,  1.0f, 1.0f,  // Top-right
-	-0.5f,  0.5f, 0.0f,  0.0f, 1.0f   // Top-left
-    };
 
-    static uint32_t quad_indices[] = {
-	0, 1, 2,  // First Triangle
-	0, 2, 3   // Second Triangle
-    };
+uint32_t build_shader_from_src(const char *src, GLenum shader_type) {
+    uint32_t id = glCreateShader(shader_type);
+    glShaderSource(id, 1, &src, NULL);
+    glCompileShader(id);
 
+    int success;
+    glGetShaderiv(id, GL_COMPILE_STATUS, &success);
+
+    if (!success) {
+	glGetShaderInfoLog(id, GL_ERROR_BUFFER_MAX_LENGTH, NULL, gl_error_buffer);
+	exit_with_error("Failed to compile shader (type 0x%04X). Error:\n  %s\nSource:\n%s\n", shader_type, gl_error_buffer, src);
+    }
+
+    return id;
+}
+
+uint32_t link_vert_frag_shaders(uint32_t vert, uint32_t frag) {
+    uint32_t id = glCreateProgram();
+    glAttachShader(id, vert);
+    glAttachShader(id, frag);
+    glLinkProgram(id);
+
+    int success;
+    glGetProgramiv(id, GL_LINK_STATUS, &success);
+
+    if (!success) {
+	glGetProgramInfoLog(id, GL_ERROR_BUFFER_MAX_LENGTH, NULL, gl_error_buffer);
+	exit_with_error("Failed to compile program. Error:\n  %s", gl_error_buffer);
+    }
+
+    return id;
+}
+
+uint32_t build_default_shaders() {
     static const char *vert_shader_source =
 	"#version 430 core\n"
-	"layout (location = 0) in vec3 aPos;\n"
+	"layout (location = 0) in vec2 aPos;\n"
 	"layout (location = 1) in vec2 aTexCoord;\n"
+	"layout (location = 2) in vec4 aColor;\n"
+	"uniform mat4 projection;\n"
 	"out vec2 TexCoord;\n"
+	"out vec4 Color;\n"
 	"void main() {\n"
-	"    gl_Position = vec4(aPos, 1.0);\n"
+	"    gl_Position = projection * vec4(aPos, 0.0, 1.0);\n"
 	"    TexCoord = aTexCoord;\n"
+	"    Color = aColor;\n"
 	"}";
+    uint32_t vert_shader = build_shader_from_src(vert_shader_source, GL_VERTEX_SHADER);
 
     static const char *frag_shader_source =
 	"#version 430 core\n"
 	"out vec4 FragColor;\n"
 	"in vec2 TexCoord;\n"
+	"in vec4 Color;\n"
 	"uniform sampler2D texture1;\n"
 	"void main() {\n"
-	"    FragColor = texture(texture1, TexCoord);\n"
+	"    FragColor = Color * texture(texture1, TexCoord);\n"
 	"}";
+    uint32_t frag_shader = build_shader_from_src(frag_shader_source, GL_FRAGMENT_SHADER);
 
-    uint32_t vbo, ebo;
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-    glGenBuffers(1, &ebo);
+    uint32_t shader_program = link_vert_frag_shaders(vert_shader, frag_shader);
 
-    glBindVertexArray(vao);
+    glDeleteShader(vert_shader);
+    glDeleteShader(frag_shader);
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quad_vertices), quad_vertices, GL_DYNAMIC_DRAW);
+    return shader_program;
+}
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(quad_indices), quad_indices, GL_DYNAMIC_DRAW);
+Gl_State initialize_gl_state() {
+    Gl_State gl_state = {0};
 
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) 0);
+    glGenVertexArrays(1, &gl_state.vao);
+    glGenBuffers(1, &gl_state.vbo);
+    glGenBuffers(1, &gl_state.ebo);
+
+    glBindVertexArray(gl_state.vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, gl_state.vbo);
+
+    size_t total_size = MAX_VERT * (2 + 2 + 4) * sizeof(float);
+    glBufferData(GL_ARRAY_BUFFER, total_size, NULL, GL_STREAM_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gl_state.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, MAX_IDX * sizeof(uint32_t), NULL, GL_STREAM_DRAW);
+
+    // Positions -- vec2
+    size_t stride = 2 * sizeof(float);
+    size_t offset = 0;
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *)offset);
     glEnableVertexAttribArray(0);
 
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) (3 * sizeof(float)));
+    // TexCoords -- vec2
+    offset += stride * MAX_VERT;
+    stride = 2 * sizeof(float);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (void *)offset);
     glEnableVertexAttribArray(1);
+
+    // Color -- vec4
+    offset += stride * MAX_VERT;
+    stride = 4 * sizeof(float);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, (void *)offset);
+    glEnableVertexAttribArray(2);
+
+    offset += stride * MAX_VERT;
+    assert(offset == total_size);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
+    gl_state.shader = build_default_shaders();
+
+
+    gl_state.empty_texture = load_empty_texture();
+
+    return gl_state;
+}
+
+void set_ortho_projection(int width, int height) {
+    mat4 projection;
+    glm_ortho(0.0f, width, height, 0.0f, -1.0f, 1.0f, projection);
+
+    glUseProgram(g_gl_state.shader);
+    glUniformMatrix4fv(glGetUniformLocation(g_gl_state.shader, "projection"), 1, GL_FALSE, (float *)projection);
+    glUseProgram(0);
+}
+
+Texture load_texture(const char *file) {
+    Texture texture = {0};
+
+    glGenTextures(1, &texture.id);
+    glBindTexture(GL_TEXTURE_2D, texture.id);
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    stbi_set_flip_vertically_on_load(true);
+    stbi_set_flip_vertically_on_load(false);
     int width, height, channel_count;
-    uint8_t *image_data = stbi_load("res/claesz.png", &width, &height, &channel_count, STBI_rgb_alpha);
+    uint8_t *image_data = stbi_load(file, &width, &height, &channel_count, STBI_rgb_alpha);
     if (image_data == NULL) {
-	exit_with_error("Failed to load image at res/claesz.png");
+	exit_with_error("Failed to load image at %s", file);
     }
 
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
@@ -217,30 +328,190 @@ void initialize_gl() {
     glBindTexture(GL_TEXTURE_2D, 0);
     stbi_image_free(image_data);
 
-    uint32_t vert_shader_id = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vert_shader_id, 1, &vert_shader_source, NULL);
-    glCompileShader(vert_shader_id);
+    texture.w = (float)width;
+    texture.h = (float)height;
 
-    uint32_t frag_shader_id = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(frag_shader_id, 1, &frag_shader_source, NULL);
-    glCompileShader(frag_shader_id);
-
-    shader_program_id = glCreateProgram();
-    glAttachShader(shader_program_id, vert_shader_id);
-    glAttachShader(shader_program_id, frag_shader_id);
-    glLinkProgram(shader_program_id);
-
-    glDeleteShader(vert_shader_id);
-    glDeleteShader(frag_shader_id);
+    return texture;
 }
 
-void draw() {
-    glUseProgram(shader_program_id);
-    glBindVertexArray(vao);
-    glBindTexture(GL_TEXTURE_2D, texture);
+Texture load_empty_texture() {
+    Texture texture = {0};
+    texture.w = texture.h = 1;
 
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    glGenTextures(1, &texture.id);
+    glBindTexture(GL_TEXTURE_2D, texture.id);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    uint32_t white = -1;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &white);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    return texture;
+}
+
+Texture load_font_atlas_texture(const char *file, uint32_t atlas_dim) {
+    Texture texture = {0};
+
+    glGenTextures(1, &texture.id);
+    glBindTexture(GL_TEXTURE_2D, texture.id);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    uint8_t *font_atlas = bake_font(file, atlas_dim);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlas_dim, atlas_dim, 0, GL_RGBA, GL_UNSIGNED_BYTE, font_atlas);
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    free(font_atlas);
+
+    texture.w = texture.h = (float)atlas_dim;
+
+    return texture;
+}
+
+void draw_texture(Rect dest, Texture texture, Rect src, vec4 color) {
+    glBindBuffer(GL_ARRAY_BUFFER, g_gl_state.vbo);
+
+    size_t total_size = MAX_VERT * (2 + 2 + 4) * sizeof(float);
+    size_t vert_to_sub_count = 4;
+    size_t idx_to_sub_count = 6;
+    assert(vert_to_sub_count < MAX_VERT);
+    assert(idx_to_sub_count < MAX_IDX);
+    size_t stride, offset;
+
+    // Positions -- vec2
+    offset = 0;
+    stride = 2 * sizeof(float);
+    float positions[] = {
+	dest.x, dest.y,
+	dest.x + dest.w, dest.y,
+	dest.x, dest.y + dest.h,
+	dest.x + dest.w, dest.y + dest.h
+    };
+    assert(sizeof(positions) == stride * vert_to_sub_count);
+    glBufferSubData(GL_ARRAY_BUFFER, offset, sizeof(positions), positions);
+
+    // TexCoords -- vec2
+    offset += stride * MAX_VERT;
+    stride = 2 * sizeof(float);
+    Rect src_norm = (Rect){src.x / texture.w, src.y / texture.h, src.w / texture.w, src.h / texture.h};
+    float tex_coords[] = {
+	src_norm.x, src_norm.y,
+	src_norm.x + src_norm.w, src_norm.y,
+	src_norm.x, src_norm.y + src_norm.h,
+	src_norm.x + src_norm.w, src_norm.y + src_norm.h
+    };
+    assert(sizeof(tex_coords) == stride * vert_to_sub_count);
+    glBufferSubData(GL_ARRAY_BUFFER, offset, sizeof(tex_coords), tex_coords);
+
+    // Color -- vec4
+    offset += stride * MAX_VERT;
+    stride = 4 * sizeof(float);
+    float colors[16];
+    for (int i = 0; i < 4; i++) memcpy(colors + i * 4, color, 4 * sizeof(float));
+    assert(sizeof(colors) == stride * vert_to_sub_count);
+    glBufferSubData(GL_ARRAY_BUFFER, offset, sizeof(colors), colors);
+
+    offset += stride * MAX_VERT;
+    assert(offset == total_size);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gl_state.ebo);
+
+    uint32_t indices[] = {
+	2, 1, 0,
+	2, 3, 1
+    };
+    assert(sizeof(indices) / sizeof(indices[0]) == idx_to_sub_count);
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, sizeof(indices), indices);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+    glUseProgram(g_gl_state.shader);
+    glBindVertexArray(g_gl_state.vao);
+    glBindTexture(GL_TEXTURE_2D, texture.id);
+
+    glDrawElements(GL_TRIANGLES, idx_to_sub_count, GL_UNSIGNED_INT, 0);
 
     glBindVertexArray(0);
     glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+}
+
+void draw_quad(Rect quad, vec4 color) {
+    draw_texture(quad, g_gl_state.empty_texture, (Rect){0}, color);
+}
+
+void draw_scaled_texture(vec2 pos, Texture texture, float scale) {
+    vec2 size = {texture.w, texture.h};
+    glm_vec2_scale(size, scale, size);
+    draw_texture((Rect){pos[0], pos[1], size[0], size[1]},
+		 texture,
+		 (Rect){0.0f, 0.0f, texture.w, texture.h},
+		 (vec4){1.0f, 1.0f, 1.0f, 1.0f});
+}
+
+uint8_t *bake_font(const char *file_name, int atlas_dim) {
+    FILE *font_file = fopen(file_name, "rb");
+    if (!font_file) {
+	exit_with_error("Failed to load font at %s", file_name);
+    }
+
+    fseek(font_file, 0, SEEK_END);
+    size_t font_size = ftell(font_file);
+    rewind(font_file);
+
+    uint8_t *font_bytes = malloc(font_size);
+    fread(font_bytes, 1, font_size, font_file);
+    fclose(font_file);
+
+    size_t pixel_count = atlas_dim * atlas_dim;
+    uint8_t *atlas_gray_bytes = calloc(1, pixel_count);
+
+    stbtt_bakedchar char_data[95]; // ASCII Range: [32, 126]
+    int result = stbtt_BakeFontBitmap(font_bytes, 0, 32.0f,
+				      atlas_gray_bytes, atlas_dim, atlas_dim,
+				      32, 95, char_data);
+    free(font_bytes);
+
+    if (result <= 0) {
+	exit_with_error("Failed to bake font bitmap. stbtt_BakeFontBitmap(...) = %d", result);
+    }
+
+    uint8_t *atlas_rgba_bytes = malloc(pixel_count * 4);
+    for (size_t i = 0; i < pixel_count; i++) {
+	atlas_rgba_bytes[i * 4 + 0] = atlas_gray_bytes[i];
+	atlas_rgba_bytes[i * 4 + 1] = atlas_gray_bytes[i];
+	atlas_rgba_bytes[i * 4 + 2] = atlas_gray_bytes[i];
+	/* atlas_rgba_bytes[i * 4 + 3] = atlas_gray_bytes[i] > 0 ? 0xFF : 0; */
+	atlas_rgba_bytes[i * 4 + 3] = atlas_gray_bytes[i];
+    }
+
+    free(atlas_gray_bytes);
+
+    return atlas_rgba_bytes;
+}
+
+void test_bake_font_to_png(const char *font_file_name, const char *out_png_file_name) {
+    enum { ATLAS_DIM = 1024 };
+
+    uint8_t *atlas_bytes = bake_font(font_file_name, ATLAS_DIM);
+
+    int write_png_result = stbi_write_png(out_png_file_name, ATLAS_DIM, ATLAS_DIM, 1, atlas_bytes, ATLAS_DIM);
+    if (!write_png_result) {
+	exit_with_error("Failed to write baked atlas to %s", out_png_file_name);
+    }
+
+    trace_log("test_bake_font_to_png: wrote baked atlas png to %s", out_png_file_name);
+
+    free(atlas_bytes);
 }
