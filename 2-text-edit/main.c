@@ -31,6 +31,11 @@ typedef struct Rect {
     float w, h;
 } Rect;
 
+typedef struct Window_State {
+    int w, h;
+    GLFWwindow *glfw_window;
+} Window_State;
+
 typedef struct Gl_State {
     uint32_t vbo;
     uint32_t ebo;
@@ -49,6 +54,7 @@ typedef struct Baked_Font {
 } Baked_Font;
 
 static Gl_State g_gl_state;
+static Window_State g_window_state;
 static char gl_error_buffer[GL_ERROR_BUFFER_MAX_LENGTH];
 
 void exit_with_error(const char *msg, ...);
@@ -70,13 +76,14 @@ Texture load_texture(const char *file);
 Texture load_empty_texture();
 
 void draw_texture(Rect dest, Texture texture, Rect src, vec4 color);
+void draw_texture_scaled(vec2 pos, Texture texture, float scale);
+void draw_texture_scaled_tinted(vec2 pos, Texture texture, float scale, vec4 color);
 void draw_quad(Rect quad, vec4 color);
-void draw_scaled_texture(vec2 pos, Texture texture, float scale);
 
 Baked_Font bake_font(const char *file_name, float points_height, int atlas_dim);
 void test_bake_font_to_png(const char *font_file_name, const char *out_png_file_name, float points_height, int atlas_dim);
 Baked_Font bake_font_to_texture(const char *file, float points_height, int atlas_dim);
-void draw_glyph(char glyph, vec2 pos, vec4 color, Baked_Font font);
+void draw_string(const char *str, vec2 pos, vec4 color, Baked_Font font, float line_height);
 
 int main() {
     if (!glfwInit()) {
@@ -90,14 +97,16 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* glfw_window = glfwCreateWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Text Edit Proto", NULL, NULL);
-    if (glfw_window == NULL) {
+    g_window_state.w = SCREEN_WIDTH;
+    g_window_state.h = SCREEN_HEIGHT;
+    g_window_state.glfw_window = glfwCreateWindow(g_window_state.w, g_window_state.h, "Text Edit Proto", NULL, NULL);
+    if (g_window_state.glfw_window == NULL) {
 	exit_with_error("Failed to create GLFW window");
     }
 
     trace_log("GLFW window created");
 
-    glfwMakeContextCurrent(glfw_window);
+    glfwMakeContextCurrent(g_window_state.glfw_window);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
 	exit_with_error("Failed to load GL function pointers");
@@ -109,15 +118,15 @@ int main() {
     trace_log("  Vendor:   %s", glGetString(GL_VENDOR));
     trace_log("  Renderer: %s", glGetString(GL_RENDERER));
 
-    glfwSetKeyCallback(glfw_window, keyboard_callback);
-    glfwSetWindowSizeCallback(glfw_window, window_size_callback);
+    glfwSetKeyCallback(g_window_state.glfw_window, keyboard_callback);
+    glfwSetWindowSizeCallback(g_window_state.glfw_window, window_size_callback);
 
     g_gl_state = initialize_gl_state();
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
-    glClearColor(0.3f, 0.0f, 0.0f, 1.0f);
+    glClearColor(0.09f, 0.07f, 0.07f, 1.0f);
 
     set_ortho_projection(SCREEN_WIDTH, SCREEN_HEIGHT);
 
@@ -127,23 +136,23 @@ int main() {
     Baked_Font baked_font = bake_font_to_texture("res/ubuntu_mono.ttf", 32.0f, 512);
 
     trace_log("Entering main loop");
-    while (!glfwWindowShouldClose(glfw_window)) {
+    while (!glfwWindowShouldClose(g_window_state.glfw_window)) {
 	glClear(GL_COLOR_BUFFER_BIT);
 
-	draw_scaled_texture((vec2){5.0f, 5.0f}, claesz, 0.7f);
+	float bg_scale = 0.7f;
+	vec2 bg_pos = {
+	    g_window_state.w * 0.5f - claesz.w * bg_scale * 0.5f,
+	    g_window_state.h * 0.5f - claesz.h * bg_scale * 0.5f
+	};
+	draw_texture_scaled_tinted(bg_pos, claesz, bg_scale, (vec4){0.22f, 0.2f, 0.2f, 0.5f});
 
-	draw_quad((Rect){200.0f, 290.0f, 50.0f, 50.0f}, (vec4){0.0f, 1.0f, 0.0f, 0.5f});
+	draw_string("Hello Big World!\nGoodbye Small Universe?",
+		    (vec2){20.0f, 50.0f},
+		    (vec4){0.8f, 0.8f, 0.8f, 1.0f},
+		    baked_font,
+		    baked_font.points_height);
 
-	draw_scaled_texture((vec2){50.0f, 50.0f}, baked_font.tex, 4.0f);
-
-	const char *hello = "Hello";
-	float x = 10.0f;
-	for (const char *hello_cursor = hello; *hello_cursor != '\0'; hello_cursor++) {
-	    draw_glyph(*hello_cursor, (vec2){x, 10.0f}, (vec4){0.6f, 0.6f, 0.6f, 1.0f}, baked_font);
-	    x += 40.0f;
-	}
-
-	glfwSwapBuffers(glfw_window);
+	glfwSwapBuffers(g_window_state.glfw_window);
 	glfwPollEvents();
     }
 
@@ -197,6 +206,8 @@ void keyboard_callback(GLFWwindow *window, int key, int scancode, int action, in
 void window_size_callback(GLFWwindow *window, int width, int height) {
     (void)window;
 
+    g_window_state.w = width;
+    g_window_state.h = height;
     glViewport(0, 0, width, height);
     set_ortho_projection(width, height);
 }
@@ -449,17 +460,26 @@ void draw_texture(Rect dest, Texture texture, Rect src, vec4 color) {
     glUseProgram(0);
 }
 
-void draw_quad(Rect quad, vec4 color) {
-    draw_texture(quad, g_gl_state.empty_texture, (Rect){0}, color);
-}
-
-void draw_scaled_texture(vec2 pos, Texture texture, float scale) {
+void draw_texture_scaled(vec2 pos, Texture texture, float scale) {
     vec2 size = {texture.w, texture.h};
     glm_vec2_scale(size, scale, size);
     draw_texture((Rect){pos[0], pos[1], size[0], size[1]},
 		 texture,
 		 (Rect){0.0f, 0.0f, texture.w, texture.h},
 		 (vec4){1.0f, 1.0f, 1.0f, 1.0f});
+}
+
+void draw_texture_scaled_tinted(vec2 pos, Texture texture, float scale, vec4 color) {
+    vec2 size = {texture.w, texture.h};
+    glm_vec2_scale(size, scale, size);
+    draw_texture((Rect){pos[0], pos[1], size[0], size[1]},
+		 texture,
+		 (Rect){0.0f, 0.0f, texture.w, texture.h},
+		 color);
+}
+
+void draw_quad(Rect quad, vec4 color) {
+    draw_texture(quad, g_gl_state.empty_texture, (Rect){0}, color);
 }
 
 Baked_Font bake_font(const char *file_name, float points_height, int atlas_dim) {
@@ -541,18 +561,40 @@ Baked_Font bake_font_to_texture(const char *file, float points_height, int atlas
     return baked_font;
 }
 
+void draw_string(const char *str, vec2 pos, vec4 color, Baked_Font font, float line_height) {
+    float x = pos[0];
+    float y = pos[1];
 
-void draw_glyph(char glyph, vec2 pos, vec4 color, Baked_Font font) {
-    int glyph_i = glyph - font.base_ascii;
-    assert((size_t)glyph_i < font.glyph_count && "Non-printable glyph encountered");
+    for (const char *cur = str; *cur != '\0'; cur++) {
+	if ((uint8_t)*cur >= font.base_ascii && (uint8_t)*cur < (font.base_ascii + font.glyph_count))
+	{
+	    stbtt_bakedchar metrics = font.glyph_metrics[*cur - font.base_ascii];
 
-    /* typedef struct {unsigned short x0,y0,x1,y1; float xoff,yoff,xadvance;} stbtt_bakedchar; */
-    stbtt_bakedchar metrics = font.glyph_metrics[glyph_i];
-    float glyph_px_w = (float)(metrics.x1 - metrics.x0);
-    float glyph_px_h = (float)(metrics.y1 - metrics.y0);
+	    float glyph_px_w = (float)(metrics.x1 - metrics.x0);
+	    float glyph_px_h = (float)(metrics.y1 - metrics.y0);
 
-    Rect dest = {pos[0], pos[1], glyph_px_w, glyph_px_h};
-    Rect src = {metrics.x0, metrics.y0, glyph_px_w, glyph_px_h};
+	    Rect dest = {
+		x + (float)metrics.xoff,
+		y + (float)metrics.yoff,
+		glyph_px_w,
+		glyph_px_h
+	    };
 
-    draw_texture(dest, font.tex, src, color);
+	    Rect src = {
+		metrics.x0,
+		metrics.y0,
+		glyph_px_w,
+		glyph_px_h
+	    };
+
+	    draw_texture(dest, font.tex, src, color);
+
+	    x += (float)metrics.xadvance;
+	} else if (*cur == '\n') {
+	    x = pos[0];
+	    y += line_height;
+	} else {
+	    exit_with_error("Non-printable glyph encountered: 0x%02X\n", *cur);
+	}
+    }
 }
