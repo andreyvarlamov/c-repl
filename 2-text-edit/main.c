@@ -354,7 +354,7 @@ Gl_State initialize_gl_state() {
     // Positions -- vec2
     size_t stride = 2 * sizeof(float);
     size_t offset = 0;
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *)offset);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, (void *)offset);
     glEnableVertexAttribArray(0);
 
     // TexCoords -- vec2
